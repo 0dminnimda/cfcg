@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-from subprocess import check_output
 from typing import List, Tuple
 
 from pycparser import c_ast
@@ -100,7 +99,7 @@ def generate_chart(code: str, filename: str = "<unknown>") -> str:
 
 
 # source = "int main() { float b = 2.7;\nreturn (int)(5 + 7 + b); }"
-source = """
+source = r"""
 #include <stdio.h>
 #include <math.h>
 
