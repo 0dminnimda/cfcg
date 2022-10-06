@@ -1,9 +1,26 @@
+import ast
 from contextlib import contextmanager
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from pycparser import c_ast
 
 from parser import parse  # FIXME: use relative import
+
+
+from enum import Enum
+
+
+class NodeType(Enum):
+    Box = "[", "]"
+    RoundedBox = "(", ")"
+    Capsule = "([", "])"
+    Subroutine = "[[", "]]"
+    Circle = "((", "))"
+    Rhombus = "{", "}"
+    Hexagon = "{{", "}}"
+    RightTilted = "[/", "/]"
+    LeftTilted = "[\\", "\\]"
+    # the rest is not important for us
 
 
 class ChartGenerator(c_ast.NodeVisitor):
@@ -32,8 +49,9 @@ class ChartGenerator(c_ast.NodeVisitor):
         self.visit(node)
         return "\n".join(self.lines)
 
-    def put(self, line: str) -> None:
-        self.lines.append("    " * self.level + line)
+    def put(self, line: Optional[str]) -> None:
+        if line is not None:
+            self.lines.append("    " * self.level + line)
 
     @contextmanager
     def indent(self):
@@ -43,31 +61,47 @@ class ChartGenerator(c_ast.NodeVisitor):
         finally:
             self.level -= 1
 
-    def alias(self, text: str) -> str:
-        return f'["{text}"]'
+    def connect(self, a: str, b: str) -> None:
+        self.connections.append((a, b))
+
+    def alias(self, text: str, type: NodeType = NodeType.Box) -> str:
+        return type.value[0] + repr(text) + type.value[1]
 
     def subgraph_name(self) -> str:
         return f"subgraph SG{self.subgraph_id}"
 
-    def subgraph(self, text: str = " ") -> str:
-        return self.subgraph_name() + self.alias(text)
+    def subgraph(self, text: str = " ", type: NodeType = NodeType.Box) -> str:
+        return self.subgraph_name() + self.alias(text, type)
 
     def node_name(self) -> str:
         return f"n{self.subgraph_id}_{self.node_id}"
 
-    # def node(self, text: str = " ") -> str:
-    #     return self.node_name() + self.alias(text)
+    # def node(self, text: str = " ", type: NodeType = NodeType.Box) -> str:
+    #     return self.node_name() + self.alias(text, type)
 
     def next_node_name(self) -> str:
         self.node_id += 1
         return self.node_name()
 
-    def next_node(self, text: str = " ") -> str:
-        return self.next_node_name() + self.alias(text)
+    def next_node(self, text: str = " ", type: NodeType = NodeType.Box) -> str:
+        return self.next_node_name() + self.alias(text, type)
+
+    # def put_next_node(self, node: c_ast.Node) -> bool:
+    #     result = self.visit(node)
+    #     if result is not None:
+    #         assert isinstance(node, str)
+    #         self.put(self.next_node(result))
+    #         return True
+    #     return False
 
     # def visit(self, node):
     #     print(node)
     #     return super().visit(node)
+
+    def visit_s(self, node: c_ast.Node) -> str:
+        result = str(self.visit(node))
+        assert isinstance(result, str)
+        return result
 
     def visit_FuncDef(self, node: c_ast.FuncDef) -> None:
         self.put(self.subgraph())
@@ -76,7 +110,7 @@ class ChartGenerator(c_ast.NodeVisitor):
         with self.indent():
             self.put("direction TB")
             self.visit(node.decl)
-            self.generic_visit(node.body)  # !!! I may need to visit other fields
+            self.visit(node.body)  # !!! I may need to visit other fields
 
             for a, b in self.connections:
                 self.put(f"{a} --> {b}")
@@ -90,6 +124,52 @@ class ChartGenerator(c_ast.NodeVisitor):
 
         text = f"{node.type.declname}({args})"
         self.put(self.next_node(text))
+
+    def visit_Compound(self, node: c_ast.Compound) -> None:
+        for item in node.block_items:
+            prev = self.node_name()
+            result = self.visit(item)
+            if result is not None:
+                assert isinstance(item, str)
+                self.put(self.next_node(result))
+                self.connect(prev, self.node_name())
+
+    def visit_FuncCall(self, node: c_ast.FuncCall) -> Optional[str]:
+        if node.name.name == "printf":
+            prev = self.node_name()
+            self.visit_printf(node)
+            self.connect(prev, self.node_name())
+            return None
+        if node.name.name == "scanf":
+            prev = self.node_name()
+            self.visit_scanf(node)
+            self.connect(prev, self.node_name())
+            return None
+
+        args = ""
+        if node.args:
+            args = ", ".join((self.visit_s(arg) for arg in node.args.exprs))
+
+        return f"{node.name.name}({args})"
+
+    def visit_ID(self, node: c_ast.ID) -> str:
+        return node.name
+
+    def visit_printf(self, node: c_ast.FuncCall) -> None:
+        assert node.args
+        if len(node.args.exprs) == 1:
+            text = ast.literal_eval(self.visit(node.args.exprs[0]))
+        else:
+            text = ", ".join((self.visit_s(arg) for arg in node.args.exprs[1:]))
+        self.put(self.next_node("Output: " + text, NodeType.RightTilted))
+
+    def visit_scanf(self, node: c_ast.FuncCall) -> None:
+        assert node.args
+        text = ", ".join((arg.expr.name for arg in node.args.exprs[1:]))
+        self.put(self.next_node("Input: " + text, NodeType.RightTilted))
+
+    def visit_Constant(self, node: c_ast.Constant) -> str:
+        return node.value
 
 
 def generate_chart(code: str, filename: str = "<unknown>") -> str:
